@@ -156,3 +156,6 @@ ls infrastructure/local-path-provisioner/
 git add infrastructure/local-path-provisioner/
 git commit -m "infrastructure: local-path-provisioner manifest under GitOps control"
 git push
+
+# The seed — your final manual kubectl apply
+kubectl apply -f bootstrap/root-app.yaml
