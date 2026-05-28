@@ -62,7 +62,37 @@ Which is exactly the point of where we're heading with ArgoCD next — automatio
 Ready to keep moving? Next up is your first **manual** `kubectl apply` — the local-path-provisioner — to feel the "apply by hand" half of the kubectl-then-Argo loop.
 
 
-Park the firewall issue with this note for tomorrow:
-> *"NodePort traffic from desktop via tailscale0 → laptop is being dropped despite firewalld disabled and an explicit `iifname tailscale0 accept` rule. Probably need to look at the FORWARD chain (since NodePort packets DNAT through kube-proxy's chains) and verify Fedora's defaults aren't intercepting before our rule. Also consider switching from iptables-legacy to nft-native mode and verifying RKE2's kube-proxy is using the same backend."*
+## Resolved: NodePort over Tailscale (asymmetric routing)
 
-Add that to a `NOTES.md` in the repo or just remember it. Fix it this weekend when you can think about it fresh.
+**Symptom:** SSH to the laptop's tailnet IP worked; ArgoCD NodePort (and `nc` on any
+other port) did not. `Test-NetConnection` from the desktop reported `TcpTestSucceeded:
+False`. Local `curl https://127.0.0.1:<nodeport>` on the laptop returned 200 OK.
+
+**Root cause:** Asymmetric routing of pod-originated replies. The inbound SYN arrived
+on `tailscale0` and was DNATed to the pod, but the pod's SYN-ACK went back out
+`wlp2s0f0` (the WiFi default route) instead of `tailscale0`. Tailscale installs
+policy-routing rules that steer any packet carrying fwmark `0x80000` into the main
+table (default → WiFi). Forwarded/NATed replies were being marked, so they bypassed
+the tailnet route in table 52 entirely. Host-originated traffic (e.g. `nc` listening on
+the host) wasn't marked, which is why SSH and a host-bound `nc` worked fine.
+
+**Diagnosis path:**
+- `tcpdump -ni any 'tcp port <nodeport>'` showed `In tailscale0` for the SYN and
+  `Out wlp2s0f0` for the SYN-ACK — smoking gun.
+- `ip rule list` showed rules 5210/5230/5250 intercepting `fwmark 0x80000` and
+  routing to main/default/unreachable, ahead of rule 5270 (`lookup 52`).
+- `ip route show table 52` had the tailnet host route via `tailscale0`, but the
+  marked packets never reached it.
+
+**Fix:**
+```bash
+sudo tailscale set --netfilter-mode=off
+```
+Persists across `tailscaled` restarts. Leaves Tailscale's routes intact; removes its
+netfilter rules including the mark-based steering.
+
+**Tradeoff carried forward:** loses Tailscale's anti-spoof `DROP` in `ts-input` for
+`100.64.0.0/10` arriving on non-tailscale interfaces. Acceptable on this single-node
+lab box (firewalld off, trusted LAN). Revisit when hardening — likely by putting
+explicit nft anti-spoof rules back, or moving to the Tailscale Kubernetes Operator
+which sidesteps NodePort entirely.
