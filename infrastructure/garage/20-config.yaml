@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+  namespace: storage
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  # Garage reads /etc/garage.toml at startup. Sensitive values (rpc_secret,
+  # admin_token, metrics_token) come in via GARAGE_* env vars from the
+  # garage-secrets Secret so this ConfigMap stays free of credentials.
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "lmdb"
+
+    # Single-node lab: one copy of each object. Bump to >=3 when going multi-node.
+    replication_factor = 1
+
+    rpc_bind_addr = "[::]:3901"
+    rpc_public_addr = "garage-0.garage-internal.storage.svc.cluster.local:3901"
+
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "[::]:3900"
+    root_domain = ".s3.garage.local"
+
+    [admin]
+    api_bind_addr = "[::]:3903"

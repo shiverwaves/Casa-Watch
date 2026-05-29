@@ -96,3 +96,108 @@ netfilter rules including the mark-based steering.
 lab box (firewalld off, trusted LAN). Revisit when hardening — likely by putting
 explicit nft anti-spoof rules back, or moving to the Tailscale Kubernetes Operator
 which sidesteps NodePort entirely.
+
+**Update (post-reboot flakiness):** `--netfilter-mode=off` alone has not been reliable
+across reboots. The actual durable fix is to keep `100.64.0.0/10 dev tailscale0` in
+the main routing table; toggling netfilter mode worked incidentally because it
+triggered tailscaled to rebuild routes. See the next runbook section for a systemd
+unit that pins the route persistently.
+
+---
+
+## Runbook: post-ungraceful-reboot cleanup
+
+**Symptom:** after an unclean shutdown (power loss, hard reboot, laptop suspend that
+went sideways), pods in critical namespaces sit `Terminating` indefinitely. The most
+damaging case is when the stuck pod is a `StatefulSet` member (e.g.
+`argocd-application-controller-0`) — the StatefulSet controller cannot create a new
+pod with the same ordinal name until the old one is fully gone, so the workload has
+**zero live replicas** and nothing reconciles.
+
+Symptoms downstream:
+- ArgoCD refresh annotations queue forever; `sync.revision` doesn't advance.
+- `kubectl get pods -n argocd` shows duplicates: one `Running` (1h or so) alongside
+  one `Terminating` (matching the uptime since the bad reboot).
+
+**Cause:** kubelet inherits old pod records from etcd on restart with their
+`deletionTimestamp` already set, but the finalizers / unmount hooks can't complete
+cleanly so the records never get reaped.
+
+**Recovery — force-delete every pod with a `deletionTimestamp`:**
+```bash
+NS=argocd   # repeat for each affected namespace
+kubectl -n $NS get pods -o json \
+  | jq -r '.items[] | select(.metadata.deletionTimestamp != null) | .metadata.name' \
+  | xargs -r -I{} kubectl -n $NS delete pod {} --grace-period=0 --force
+```
+
+If a pod still won't go after that, clear its finalizers explicitly:
+```bash
+kubectl -n $NS patch pod <name> --type=merge -p '{"metadata":{"finalizers":null}}'
+```
+
+**You almost never need to reapply manifests.** Pods are managed by their parent
+controller (Deployment / StatefulSet / DaemonSet / operator-managed CR). Force-deleting
+a Pod releases the slot; the controller immediately creates a fresh one from its
+own spec.
+
+**Prevention — clean shutdowns:**
+```bash
+sudo systemctl stop rke2-server   # signals containerd → pods → SIGTERM with grace
+sudo reboot
+```
+
+This is the difference between "kernel yanked the rug" and "kubelet asked everyone
+to please leave."
+
+---
+
+## Runbook: Garage one-time bootstrap
+
+The `infrastructure/garage/` manifests bring up the Garage StatefulSet but stop
+there — laying out the cluster, creating buckets, and minting credentials still
+needs a one-time human step. (Will be replaced by a bootstrap Job in a later
+commit; doing it by hand first to keep the moving parts visible.)
+
+**After `kubectl -n storage get pod garage-0` reports `1/1 Running`:**
+
+```bash
+# enter the pod
+kubectl -n storage exec -it garage-0 -- /bin/sh
+
+# inside the pod:
+
+# 1. Assign the single node into a layout (zone "dc1", 20 GiB capacity)
+NODE_ID=$(garage status | awk 'NR==3 {print $1}')   # row 3 is our node
+garage layout assign -z dc1 -c 20G "$NODE_ID"
+garage layout apply --version 1
+
+# 2. Mint an S3 access key. Capture the printed Key ID + Secret key.
+garage key create lab
+
+# 3. Create the buckets the LGTM stack + persist consumer will use
+for b in mimir-blocks loki-chunks tempo-traces casa-raw-events; do
+  garage bucket create "$b"
+  garage bucket allow --read --write --owner "$b" --key lab
+done
+
+garage bucket list   # sanity check
+exit
+```
+
+**Then store the key/secret as a Kubernetes Secret so downstream Helm charts
+can reference it:**
+
+```bash
+kubectl -n storage create secret generic garage-s3-credentials \
+  --from-literal=access-key-id='<KEY_ID_FROM_STEP_2>' \
+  --from-literal=secret-access-key='<SECRET_FROM_STEP_2>'
+```
+
+Mimir, Loki, Tempo, and the Casa-Watch `persist` consumer will all read
+`garage-s3-credentials` from the `storage` namespace (or have it projected
+across namespaces via something like external-secrets later).
+
+**If you tear down Garage's PVC and start over,** all keys and buckets are gone
+and this whole procedure repeats. That's why it'll move into a bootstrap Job
+once the manual flow is understood.

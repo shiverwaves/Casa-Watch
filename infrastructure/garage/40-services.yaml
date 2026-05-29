@@ -1,0 +1,56 @@
+# Headless service: gives the StatefulSet pod a stable DNS name
+#   garage-0.garage-internal.storage.svc.cluster.local
+# used as rpc_public_addr in garage.toml. Required even with replicas=1 so the
+# name doesn't change when the pod is rescheduled.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-internal
+  namespace: storage
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  clusterIP: None
+  selector:
+    app: garage
+  ports:
+    - name: rpc
+      port: 3901
+      targetPort: rpc
+
+---
+# ClusterIP service for the S3 API. Downstream workloads (Mimir, Loki, Tempo,
+# Casa-Watch persist consumer) connect to:
+#   http://garage.storage.svc.cluster.local:3900
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+  namespace: storage
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  selector:
+    app: garage
+  ports:
+    - name: s3-api
+      port: 3900
+      targetPort: s3-api
+
+---
+# Admin API. Used by bootstrap operations (creating buckets, granting keys).
+# Not exposed beyond the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-admin
+  namespace: storage
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  selector:
+    app: garage
+  ports:
+    - name: admin
+      port: 3903
+      targetPort: admin
