@@ -96,3 +96,56 @@ netfilter rules including the mark-based steering.
 lab box (firewalld off, trusted LAN). Revisit when hardening — likely by putting
 explicit nft anti-spoof rules back, or moving to the Tailscale Kubernetes Operator
 which sidesteps NodePort entirely.
+
+**Update (post-reboot flakiness):** `--netfilter-mode=off` alone has not been reliable
+across reboots. The actual durable fix is to keep `100.64.0.0/10 dev tailscale0` in
+the main routing table; toggling netfilter mode worked incidentally because it
+triggered tailscaled to rebuild routes. See the next runbook section for a systemd
+unit that pins the route persistently.
+
+---
+
+## Runbook: post-ungraceful-reboot cleanup
+
+**Symptom:** after an unclean shutdown (power loss, hard reboot, laptop suspend that
+went sideways), pods in critical namespaces sit `Terminating` indefinitely. The most
+damaging case is when the stuck pod is a `StatefulSet` member (e.g.
+`argocd-application-controller-0`) — the StatefulSet controller cannot create a new
+pod with the same ordinal name until the old one is fully gone, so the workload has
+**zero live replicas** and nothing reconciles.
+
+Symptoms downstream:
+- ArgoCD refresh annotations queue forever; `sync.revision` doesn't advance.
+- `kubectl get pods -n argocd` shows duplicates: one `Running` (1h or so) alongside
+  one `Terminating` (matching the uptime since the bad reboot).
+
+**Cause:** kubelet inherits old pod records from etcd on restart with their
+`deletionTimestamp` already set, but the finalizers / unmount hooks can't complete
+cleanly so the records never get reaped.
+
+**Recovery — force-delete every pod with a `deletionTimestamp`:**
+```bash
+NS=argocd   # repeat for each affected namespace
+kubectl -n $NS get pods -o json \
+  | jq -r '.items[] | select(.metadata.deletionTimestamp != null) | .metadata.name' \
+  | xargs -r -I{} kubectl -n $NS delete pod {} --grace-period=0 --force
+```
+
+If a pod still won't go after that, clear its finalizers explicitly:
+```bash
+kubectl -n $NS patch pod <name> --type=merge -p '{"metadata":{"finalizers":null}}'
+```
+
+**You almost never need to reapply manifests.** Pods are managed by their parent
+controller (Deployment / StatefulSet / DaemonSet / operator-managed CR). Force-deleting
+a Pod releases the slot; the controller immediately creates a fresh one from its
+own spec.
+
+**Prevention — clean shutdowns:**
+```bash
+sudo systemctl stop rke2-server   # signals containerd → pods → SIGTERM with grace
+sudo reboot
+```
+
+This is the difference between "kernel yanked the rug" and "kubelet asked everyone
+to please leave."
