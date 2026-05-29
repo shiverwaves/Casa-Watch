@@ -1,33 +1,27 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: root
+  name: garage
   namespace: argocd
+  annotations:
+    # Storage backend. Lands before any workload that needs S3 (LGTM stack,
+    # Casa-Watch persist consumer).
+    argocd.argoproj.io/sync-wave: "0"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
-
-  # Root no longer reconciles infrastructure manifests directly.
-  # It only creates child Application resources, which then each
-  # reconcile their own subdirectories under infrastructure/.
   source:
     repoURL: https://github.com/shiverwaves/casa-watch.git
     targetRevision: HEAD
-    path: bootstrap/applications
+    path: infrastructure/garage
     directory:
       recurse: false
-
   destination:
     server: https://kubernetes.default.svc
-    # Child Application CRs land in the argocd namespace.
-    namespace: argocd
-
+    namespace: storage
   syncPolicy:
     automated:
-      # Root prunes child Applications when their files are removed from
-      # bootstrap/applications/. The children themselves prune their own
-      # cluster resources per their own policies.
       prune: true
       selfHeal: true
     syncOptions:

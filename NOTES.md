@@ -149,3 +149,55 @@ sudo reboot
 
 This is the difference between "kernel yanked the rug" and "kubelet asked everyone
 to please leave."
+
+---
+
+## Runbook: Garage one-time bootstrap
+
+The `infrastructure/garage/` manifests bring up the Garage StatefulSet but stop
+there — laying out the cluster, creating buckets, and minting credentials still
+needs a one-time human step. (Will be replaced by a bootstrap Job in a later
+commit; doing it by hand first to keep the moving parts visible.)
+
+**After `kubectl -n storage get pod garage-0` reports `1/1 Running`:**
+
+```bash
+# enter the pod
+kubectl -n storage exec -it garage-0 -- /bin/sh
+
+# inside the pod:
+
+# 1. Assign the single node into a layout (zone "dc1", 20 GiB capacity)
+NODE_ID=$(garage status | awk 'NR==3 {print $1}')   # row 3 is our node
+garage layout assign -z dc1 -c 20G "$NODE_ID"
+garage layout apply --version 1
+
+# 2. Mint an S3 access key. Capture the printed Key ID + Secret key.
+garage key create lab
+
+# 3. Create the buckets the LGTM stack + persist consumer will use
+for b in mimir-blocks loki-chunks tempo-traces casa-raw-events; do
+  garage bucket create "$b"
+  garage bucket allow --read --write --owner "$b" --key lab
+done
+
+garage bucket list   # sanity check
+exit
+```
+
+**Then store the key/secret as a Kubernetes Secret so downstream Helm charts
+can reference it:**
+
+```bash
+kubectl -n storage create secret generic garage-s3-credentials \
+  --from-literal=access-key-id='<KEY_ID_FROM_STEP_2>' \
+  --from-literal=secret-access-key='<SECRET_FROM_STEP_2>'
+```
+
+Mimir, Loki, Tempo, and the Casa-Watch `persist` consumer will all read
+`garage-s3-credentials` from the `storage` namespace (or have it projected
+across namespaces via something like external-secrets later).
+
+**If you tear down Garage's PVC and start over,** all keys and buckets are gone
+and this whole procedure repeats. That's why it'll move into a bootstrap Job
+once the manual flow is understood.
