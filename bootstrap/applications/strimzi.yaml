@@ -1,0 +1,36 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: strimzi
+  namespace: argocd
+  annotations:
+    # Strimzi installs CRDs (Kafka, KafkaNodePool, KafkaTopic, KafkaUser, …)
+    # that consumers may depend on later. Land it after storage but before
+    # any workload that needs Kafka.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shiverwaves/casa-watch.git
+    targetRevision: HEAD
+    path: infrastructure/strimzi
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

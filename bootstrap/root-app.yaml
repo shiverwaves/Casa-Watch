@@ -3,33 +3,39 @@ kind: Application
 metadata:
   name: root
   namespace: argocd
-  # Prevents accidental deletion of the root from cascading and nuking everything
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
 
+  # Root no longer reconciles infrastructure manifests directly.
+  # It only creates child Application resources, which then each
+  # reconcile their own subdirectories under infrastructure/.
   source:
-    # !!! EDIT THIS to your repo URL !!!
     repoURL: https://github.com/shiverwaves/casa-watch.git
     targetRevision: HEAD
-    path: infrastructure
+    path: bootstrap/applications
     directory:
-      recurse: true
+      recurse: false
 
   destination:
     server: https://kubernetes.default.svc
-    # Each manifest under infrastructure/ specifies its own namespace;
-    # this is just the fallback if one doesn't.
-    namespace: default
+    # Child Application CRs land in the argocd namespace.
+    namespace: argocd
 
   syncPolicy:
     automated:
-      prune: true       # delete resources removed from Git
-      selfHeal: true    # revert manual changes back to Git state
+      # NOTE: prune intentionally disabled during the app-of-apps migration.
+      # The previous root claimed every resource under infrastructure/ via a
+      # single Application. When this refactor lands, those resources will
+      # transfer to the new child Applications. With prune disabled, the old
+      # root cannot delete them mid-handoff. Re-enable prune in a follow-up
+      # commit once `argocd app list` shows root + children all Synced/Healthy.
+      prune: false
+      selfHeal: true
     syncOptions:
-      - CreateNamespace=true   # auto-create namespaces declared in manifests
-      - ServerSideApply=true   # use SSA instead of client-side apply (better conflict handling)
+      - CreateNamespace=true
+      - ServerSideApply=true
     retry:
       limit: 5
       backoff:
