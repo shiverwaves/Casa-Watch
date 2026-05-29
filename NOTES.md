@@ -186,17 +186,24 @@ exit
 ```
 
 **Then store the key/secret as a Kubernetes Secret so downstream Helm charts
-can reference it:**
+can reference it. The standard env var names (`AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`) match what the LGTM charts inject via `extraEnvFrom`:**
 
 ```bash
-kubectl -n storage create secret generic garage-s3-credentials \
-  --from-literal=access-key-id='<KEY_ID_FROM_STEP_2>' \
-  --from-literal=secret-access-key='<SECRET_FROM_STEP_2>'
+# Create the Secret in every namespace whose workloads need S3 access.
+# At minimum the observability namespace (Mimir/Loki/Tempo) needs it.
+# Casa-Watch's persist consumer will need it later in its own namespace.
+for ns in observability; do
+  kubectl create namespace "$ns" 2>/dev/null || true
+  kubectl -n "$ns" create secret generic garage-s3-credentials \
+    --from-literal=AWS_ACCESS_KEY_ID='<KEY_ID_FROM_STEP_2>' \
+    --from-literal=AWS_SECRET_ACCESS_KEY='<SECRET_FROM_STEP_2>'
+done
 ```
 
-Mimir, Loki, Tempo, and the Casa-Watch `persist` consumer will all read
-`garage-s3-credentials` from the `storage` namespace (or have it projected
-across namespaces via something like external-secrets later).
+Mimir, Loki, Tempo, and (later) the Casa-Watch `persist` consumer all read
+`garage-s3-credentials` from their own namespace. When we wire in
+external-secrets or sealed-secrets later, this duplication goes away.
 
 **If you tear down Garage's PVC and start over,** all keys and buckets are gone
 and this whole procedure repeats. That's why it'll move into a bootstrap Job

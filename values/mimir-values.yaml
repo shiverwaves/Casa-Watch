@@ -1,0 +1,70 @@
+# Mimir overrides on top of the chart's small.yaml profile.
+# Sets blocks storage to Garage (S3-compatible) and shrinks/disables
+# the components we don't need on a single-node lab.
+
+mimir:
+  structuredConfig:
+    common:
+      storage:
+        backend: s3
+        s3:
+          endpoint: garage.storage.svc.cluster.local:3900
+          region: garage
+          bucket_name: mimir-blocks
+          # Expanded from env vars (extraEnvFrom below)
+          access_key_id: ${AWS_ACCESS_KEY_ID}
+          secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+          insecure: true       # plaintext within the cluster
+    blocks_storage:
+      backend: s3
+      s3:
+        bucket_name: mimir-blocks
+    # Single-tenant lab — no X-Scope-OrgID required on requests.
+    multitenancy_enabled: false
+
+# Inject Garage credentials into every Mimir component as AWS_* env vars.
+global:
+  extraEnvFrom:
+    - secretRef:
+        name: garage-s3-credentials
+
+# Lab sizing: one replica of each storage-touching component, disabled
+# zone-aware replication (which expects 3 zones).
+ingester:
+  replicas: 1
+  zoneAwareReplication:
+    enabled: false
+store_gateway:
+  replicas: 1
+  zoneAwareReplication:
+    enabled: false
+compactor:
+  replicas: 1
+
+# Out of scope for first stand-up; turn back on later as exercises.
+alertmanager:
+  enabled: false
+ruler:
+  enabled: false
+
+# Keep the nginx gateway — that's the endpoint clients (Grafana, the OTel
+# Collector's prometheusremotewrite exporter) connect to.
+nginx:
+  enabled: true
+
+# Persistent volumes via local-path
+distributor:
+  persistentVolume:
+    storageClass: local-path
+ingester:
+  persistentVolume:
+    storageClass: local-path
+    size: 5Gi
+store_gateway:
+  persistentVolume:
+    storageClass: local-path
+    size: 5Gi
+compactor:
+  persistentVolume:
+    storageClass: local-path
+    size: 5Gi
