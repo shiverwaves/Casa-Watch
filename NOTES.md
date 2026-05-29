@@ -161,42 +161,51 @@ commit; doing it by hand first to keep the moving parts visible.)
 
 **After `kubectl -n storage get pod garage-0` reports `1/1 Running`:**
 
+The Garage image is distroless — `/garage` is the only binary, no shell. Run
+each command as a separate `kubectl exec` against the binary directly.
+
 ```bash
-# enter the pod
-kubectl -n storage exec -it garage-0 -- /bin/sh
+# 1. Find the node ID
+kubectl -n storage exec garage-0 -- /garage status
+# Grab the ID from the "Healthy nodes" section (first column).
+NODE_ID=<paste-id-here>
 
-# inside the pod:
+# 2. Assign single-node layout (zone "dc1", 20 GiB capacity)
+kubectl -n storage exec garage-0 -- /garage layout assign -z dc1 -c 20G "$NODE_ID"
+kubectl -n storage exec garage-0 -- /garage layout apply --version 1
 
-# 1. Assign the single node into a layout (zone "dc1", 20 GiB capacity)
-NODE_ID=$(garage status | awk 'NR==3 {print $1}')   # row 3 is our node
-garage layout assign -z dc1 -c 20G "$NODE_ID"
-garage layout apply --version 1
+# 3. Mint an S3 access key. CAPTURE the printed Key ID + Secret key.
+kubectl -n storage exec garage-0 -- /garage key create lab
 
-# 2. Mint an S3 access key. Capture the printed Key ID + Secret key.
-garage key create lab
-
-# 3. Create the buckets the LGTM stack + persist consumer will use
+# 4. Create buckets and grant the lab key access to each
 for b in mimir-blocks loki-chunks tempo-traces casa-raw-events; do
-  garage bucket create "$b"
-  garage bucket allow --read --write --owner "$b" --key lab
+  kubectl -n storage exec garage-0 -- /garage bucket create "$b"
+  kubectl -n storage exec garage-0 -- /garage bucket allow --read --write --owner "$b" --key lab
 done
 
-garage bucket list   # sanity check
-exit
+# 5. Sanity-check
+kubectl -n storage exec garage-0 -- /garage bucket list
 ```
 
 **Then store the key/secret as a Kubernetes Secret so downstream Helm charts
-can reference it:**
+can reference it. The standard env var names (`AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`) match what the LGTM charts inject via `extraEnvFrom`:**
 
 ```bash
-kubectl -n storage create secret generic garage-s3-credentials \
-  --from-literal=access-key-id='<KEY_ID_FROM_STEP_2>' \
-  --from-literal=secret-access-key='<SECRET_FROM_STEP_2>'
+# Create the Secret in every namespace whose workloads need S3 access.
+# At minimum the observability namespace (Mimir/Loki/Tempo) needs it.
+# Casa-Watch's persist consumer will need it later in its own namespace.
+for ns in observability; do
+  kubectl create namespace "$ns" 2>/dev/null || true
+  kubectl -n "$ns" create secret generic garage-s3-credentials \
+    --from-literal=AWS_ACCESS_KEY_ID='<KEY_ID_FROM_STEP_2>' \
+    --from-literal=AWS_SECRET_ACCESS_KEY='<SECRET_FROM_STEP_2>'
+done
 ```
 
-Mimir, Loki, Tempo, and the Casa-Watch `persist` consumer will all read
-`garage-s3-credentials` from the `storage` namespace (or have it projected
-across namespaces via something like external-secrets later).
+Mimir, Loki, Tempo, and (later) the Casa-Watch `persist` consumer all read
+`garage-s3-credentials` from their own namespace. When we wire in
+external-secrets or sealed-secrets later, this duplication goes away.
 
 **If you tear down Garage's PVC and start over,** all keys and buckets are gone
 and this whole procedure repeats. That's why it'll move into a bootstrap Job

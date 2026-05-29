@@ -1,0 +1,53 @@
+# Tempo single-binary chart (`tempo`, not `tempo-distributed`).
+# Receives OTLP gRPC/HTTP, stores blocks in Garage, generates span-metrics
+# and service-graphs to Mimir for trace-to-metrics pivots in Grafana.
+
+tempo:
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: tempo-traces
+        endpoint: garage.storage.svc.cluster.local:3900
+        region: garage
+        access_key: ${AWS_ACCESS_KEY_ID}
+        secret_key: ${AWS_SECRET_ACCESS_KEY}
+        insecure: true
+        forcepathstyle: true
+
+  # Receivers — OTLP is what the OTel Collector exports to.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  # Generate span-metrics + service-graph metrics, remote-write to Mimir.
+  # This is what powers Grafana's "trace → metrics" pivot in Explore.
+  metricsGenerator:
+    enabled: true
+    processors:
+      - service-graphs
+      - span-metrics
+    remoteWriteUrl: http://mimir-nginx.observability.svc.cluster.local/api/v1/push
+
+extraEnvFrom:
+  - secretRef:
+      name: garage-s3-credentials
+
+persistence:
+  enabled: true
+  storageClassName: local-path
+  size: 5Gi
+
+# Lab sizing
+replicas: 1
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi

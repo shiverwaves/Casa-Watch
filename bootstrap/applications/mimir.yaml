@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mimir
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  # Multi-source: chart pulled from grafana.github.io, values pulled from our repo.
+  # The "$values" reference is resolved against the second source.
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: mimir-distributed
+      targetRevision: 6.0.6
+      helm:
+        releaseName: mimir
+        valueFiles:
+          # Chart-provided "small" profile — single-node-friendly replica counts
+          # and resource requests. We layer our Garage overrides on top.
+          - small.yaml
+          - $values/values/mimir-values.yaml
+    - repoURL: https://github.com/shiverwaves/casa-watch.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
